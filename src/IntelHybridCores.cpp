@@ -245,6 +245,24 @@ static int perfHandler SYSCTL_HANDLER_ARGS {
 	return sysctl_handle_int(oidp, nullptr, v, req);
 }
 
+// ---- package totals: the kernel builds its topology from CPUID leaf 1/4 "per package" fields, which on hybrid Intel
+// are maximum addressable ids (128/128), so it sees 1 thread per core and reports every HT thread as a physical core
+// (hw.physicalcpu = machdep.cpu.core_count = 16 on 6P+HT / 4E). The scheduler topology is built before any kext loads
+// and stays as is (SMT is handled by the choose_processor hook); only the reported totals are corrected here.
+enum { kTopoPhys, kTopoCores, kTopoLogical, kTopoN = 6 };
+static sysctl_oid *gTopoOid[kTopoN] {};
+static sysctl_handler_t gTopoOrg[kTopoN] {};
+static int gTopoKind[kTopoN] {};
+static int topoHandler SYSCTL_HANDLER_ARGS {
+	for (int i = 0; i < kTopoN; i++) {
+		if (gTopoOid[i] != oidp) continue;
+		if (!gPerfOn) return gTopoOrg[i](oidp, arg1, arg2, req);
+		const int v = gTopoKind[i] == kTopoLogical ? (int)(gTyLog[0] + gTyLog[1]) : (int)(gTyPhys[0] + gTyPhys[1]);
+		return sysctl_handle_int(oidp, nullptr, v, req);
+	}
+	return EINVAL;
+}
+
 // ---- sysctls
 static int modeSysctl SYSCTL_HANDLER_ARGS {
 	int v = gMode; const int e = sysctl_handle_int(oidp, &v, 0, req);
@@ -408,12 +426,29 @@ static void perfInstall(KernelPatcher &patcher) {
 			todo[nt++] = o;
 		}
 	todo[nt++] = np;
+	// package totals (hw.physicalcpu(_max), machdep.cpu.core_count / cores_per_package / logical_per_package)
+	int ntp = 0;
+	auto addTopo = [&](sysctl_oid_list *l, const char *name, int kind) {
+		sysctl_oid *o = l ? oidFind(l, name) : nullptr;
+		if (!o || !o->oid_handler || (o->oid_kind & CTLTYPE) != CTLTYPE_INT || ntp >= kTopoN) { hcLog("topology: %s not found", name); return; }
+		gTopoOid[ntp] = o; gTopoOrg[ntp] = o->oid_handler; gTopoKind[ntp] = kind; ntp++;
+	};
+	addTopo(hwl, "physicalcpu", kTopoPhys);
+	addTopo(hwl, "physicalcpu_max", kTopoPhys);
+	sysctl_oid *md = oidFind(root, "machdep"), *mc = nullptr;
+	if (md && (md->oid_kind & CTLTYPE) == CTLTYPE_NODE) mc = oidFind(static_cast<sysctl_oid_list *>(md->oid_arg1), "cpu");
+	auto mcl = mc && (mc->oid_kind & CTLTYPE) == CTLTYPE_NODE ? static_cast<sysctl_oid_list *>(mc->oid_arg1) : nullptr;
+	addTopo(mcl, "core_count", kTopoCores);
+	addTopo(mcl, "cores_per_package", kTopoCores);
+	addTopo(mcl, "logical_per_package", kTopoLogical);
 	// static sysctl oids are in __DATA_CONST (read-only after boot): a plain store panics
 	if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) { hcLog("perflevel: kernel write denied"); return; }
 	for (int i = 0; i < nt; i++) todo[i]->oid_handler = perfHandler;
+	for (int i = 0; i < ntp; i++) gTopoOid[i]->oid_handler = topoHandler;
 	MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
 	sysctl_register_oid(&sysctl__debug_hc_perf);
 	if (auto tc = thread_call_allocate(dtLabel, nullptr)) { uint64_t dl; clock_interval_to_deadline(10, kSecondScale, &dl); thread_call_enter_delayed(tc, dl); }
+	hcLog("topology: %d totals -> %u cores / %u threads", ntp, gTyPhys[0] + gTyPhys[1], gTyLog[0] + gTyLog[1]);
 	hcLog("perflevel: %d nodes; P %u log/%u phys L1d %u L2 %u x%u, E %u log/%u phys L1d %u L2 %u x%u", nt,
 	      gTyLog[0], gTyPhys[0], gTyCache[0][1], gTyCache[0][2], gTyL2Share[0], gTyLog[1], gTyPhys[1], gTyCache[1][1], gTyCache[1][2], gTyL2Share[1]);
 }
