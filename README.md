@@ -9,7 +9,9 @@ O macOS para Intel nunca rodou num Mac com núcleos híbridos, então trata todo
 | Escalonamento por QoS | Tarefas de fundo (Spotlight, Time Machine, análise de fotos) nos núcleos E; primeiro plano nos P |
 | `hw.nperflevels` / `hw.perflevel0/1` | `2` / "Performance" e "Efficiency", com núcleos e caches reais |
 | Monitor de Atividade → Histórico da CPU | "Núcleo 1 — Desempenho" … "Núcleo 13 — Eficiência" |
-| Informações do Sistema | Sem mudança (no Intel, só lê o total de núcleos) |
+| HyperThreading dos núcleos P | Primeiro plano evita a thread irmã de um núcleo P já ocupado (como o ITMT do Linux) |
+| `hw.physicalcpu` / Informações do Sistema | Núcleos reais (10 em vez de 16) e "Hyper-Threading: Ativado" |
+| Bateria ↔ tomada | Troca de modo sozinha (ex.: 4 na bateria, 2 na tomada) |
 
 > **Atenção:** os offsets do kernel foram tirados do xnu-12377 e conferidos só no **macOS 26.7.2 (25G332)**, num i5-13450HX (6P + 4E). Cada gancho só é instalado se as instruções do kernel baterem byte a byte; em outra versão do macOS, a parte que não bater fica desligada (ver `sysctl debug.hc_log`). Testado em uma máquina só. Use por sua conta e com um pendrive de socorro à mão.
 
@@ -49,7 +51,22 @@ O modo 4 corta a potência pela metade quando há fundo pesado (menos calor e ve
 
 Threads de tempo real (áudio, vídeo) nunca são mexidas. Uma tarefa de fundo promovida acima da prioridade 20 (segurando uma trava de um app em primeiro plano) escapa do modo 4, para não travar esse app.
 
-Outros boot-args: `-hcoff` (desliga tudo), `-hcschedoff` (sem os ganchos do escalonador), `-hcperfoff` (sem `hw.perflevel` e sem os rótulos).
+**Bateria ↔ tomada:** o boot-arg `hcpower=B,T` (ex.: `hcpower=4,2`) usa o modo B na bateria e T na tomada; `sysctl debug.hc_power="4,2"` liga na hora e `"0"` desliga. O modo só muda quando a fonte muda, então um `debug.hc_mode` manual vale até o próximo plugar/desplugar. Se o modo 4 não estiver disponível, cai para o 3.
+
+**HyperThreading:** ligado por padrão; `sysctl debug.hc_smt=0/1` na hora, boot-arg `-hcsmtoff` no boot.
+
+**Totais de núcleos** (`sysctl debug.hc_perf`, boot-arg `hcperf=N`):
+
+| Valor | `hw.perflevel` e rótulos | `hw.physicalcpu(_max)` | `machdep.cpu.core_count` / `cores_per_package` / `logical_per_package` |
+|---|---|---|---|
+| 0 | do kernel | do kernel | do kernel |
+| 1 | corrigidos | núcleos reais | núcleos reais / threads |
+| **2** (padrão) | corrigidos | núcleos reais | do kernel |
+| 3 | corrigidos | do kernel | núcleos reais / threads |
+
+O padrão é 2 por causa do "Sobre este Mac" (ver Armadilhas).
+
+Outros boot-args: `-hcoff` (desliga tudo), `-hcschedoff` (sem os ganchos do escalonador), `-hcperfoff` (sem `hw.perflevel`, totais e rótulos).
 
 ## Instalação
 
@@ -58,12 +75,12 @@ Outros boot-args: `-hcoff` (desliga tudo), `-hcschedoff` (sem os ganchos do esca
 3. Reinicie e confira:
 
 ```bash
-sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name
+sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name hw.physicalcpu debug.hc_smt debug.hc_power
 ```
 
-`state 1` = escalonador instalado; `strict-ok` = modo 4 disponível. Os contadores mostram quantas escolhas foram para o tipo pedido (`bg E/P`, `fg P/E`).
+`state 1` = escalonador instalado; `strict-ok` = modo 4 disponível; `smt` = HyperThreading tratado; `auto` = troca bateria/tomada ligada. Os contadores mostram quantas escolhas foram para o tipo pedido (`bg E/P`, `fg P/E`) e, no primeiro plano em núcleos P, quantas foram para uma thread primária (`smt prim`), para uma secundária com a irmã livre (`sec-free`) ou ocupada (`sec-cont`).
 
-Binário de referência (só macOS 26.7.2 / 25G332): [`dist/`](dist). Para compilar: `DEPS=/pasta/com/MacKernelSDK+Lilu.kext bash build.sh`.
+Binário de referência (só macOS 26.7.2 / 25G332; versão 0.1.0, sem HyperThreading, totais nem `hcpower`): [`dist/`](dist). Para compilar: `DEPS=/pasta/com/MacKernelSDK+Lilu.kext bash build.sh`.
 
 ## Como funciona (e como reproduzir em outra versão)
 
@@ -85,13 +102,21 @@ O modo 4 precisa de mais dois ganchos, porque um núcleo P livre puxa da fila co
 - **`sched_dualq_choose_thread`**: um P recusa uma thread de fundo da fila. A função é estática; o endereço sai da tabela `_sched_dualq_dispatch` (+`0x30`), conferida pelo `choose_processor` em +`0x58`.
 - **`sched_dualq_thread_avoid_processor`** (+`0xf0`): uma thread de fundo que já roda num P é tirada de lá. O kernel a recoloca na fila com `SCHED_REBALANCE`.
 
-### 3. `hw.perflevel`
-O `kern_mib.c` já registra `hw.perflevel0` **e** `hw.perflevel1`; eles só respondem "1 tipo" porque as funções de máquina do Intel dizem isso. O IntelHybridCores troca o `oid_handler` desses nós (achados a partir de `_sysctl__children`) por um que responde por tipo.
+### 2b. HyperThreading
+O kernel monta a topologia pelos campos "por pacote" do CPUID (folhas 1 e 4). Nos híbridos eles trazem o máximo de ids endereçáveis (`machdep.cpu.logical_per_package` = `cores_per_package` = 128), então o kernel conclui 1 thread por núcleo: cada thread HT vira um núcleo próprio, primário de si mesmo (`processor_primary`), e o `choose_processor_smt` não sabe quais CPUs são irmãs. Essa topologia é montada antes de qualquer kext e fica como está. O IntelHybridCores agrupa os núcleos P pelo id de núcleo do CPUID `0xB` (o menor número de CPU de cada núcleo físico é a primária) e, para o primeiro plano, tira da máscara preferida e põe na de migração cada secundária cuja irmã está despachando ou rodando (`processor->state` ≥ 5).
+
+### 3. `hw.perflevel` e totais
+O `kern_mib.c` já registra `hw.perflevel0` **e** `hw.perflevel1`; eles só respondem "1 tipo" porque as funções de máquina do Intel dizem isso. O IntelHybridCores troca o `oid_handler` desses nós (achados a partir de `_sysctl__children`) por um que responde por tipo. Do mesmo jeito troca `hw.physicalcpu(_max)` e `machdep.cpu.core_count` / `cores_per_package` / `logical_per_package`, guardando o tratador original (usado com `debug.hc_perf=0`).
 
 ### 4. Monitor de Atividade
 O Monitor lê o serviço `cpus` do IODeviceTree e, em cada filho, `cluster-type` (dado `"P"`/`"E"`, o byte `'E'` = Eficiência, `'P'` = Desempenho, `'M'` = um terceiro tipo) e `logical-cpu-id`. Depois **ordena todos os filhos por `logical-cpu-id`**. Num PC, os filhos são os processadores ACPI (`C000@0`, `C00C@38`… o endereço é o x2APIC), e o ACPI costuma declarar mais processadores do que existem; os vazios recebem ids 64+ para irem para o fim da lista.
 
+### 5. Bateria ↔ tomada
+O serviço da bateria (`IOPMPowerSource`, ex.: `AppleSmartBattery`) é publicado uma vez só no boot: a notificação de publicação **não** dispara de novo ao plugar ou desplugar. O IntelHybridCores guarda o serviço e lê `ExternalConnected` a cada 5 s (`thread_call`).
+
 ### Armadilhas (cada uma custou um panic ou um teste falho)
+
+- **"Sobre este Mac" mostra o nome pelo `machdep.cpu.core_count`.** Ele junta o tipo de processador do SMBIOS com esse total e procura numa tabela de CPUs que a Apple vendeu. Com 16 "núcleos" não acha nada e mostra o nome real do CPUID; com o tipo `0x0F01` (Xeon W, comum em configs do OpenCore) e 10 núcleos ele acha o "Xeon W 10-Core" do iMac Pro. Por isso o padrão (`hc_perf=2`) corrige `hw.physicalcpu`, que os programas usam, e deixa o `machdep.cpu.core_count` do kernel. Trocar o `ProcessorType` para um código de Core i5 num SMBIOS de MacBookPro16,1 (que só teve i7/i9) dá CPU "desconhecida".
 
 - **O kernel do Tahoe é compilado com LTO.** `ml_get_cpu_types`, `ml_get_cpu_number_type` e afins foram embutidas no `sysctl_hw_generic` como constantes: desviar essas funções não muda nada. Por isso o IntelHybridCores troca o tratador das sysctls.
 - **As sysctls estáticas ficam em `__DATA_CONST`**, que vira somente leitura depois do boot: gravar o `oid_handler` direto dá **panic**. Grave com `MachInfo::setKernelWriting` do Lilu.

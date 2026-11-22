@@ -9,7 +9,9 @@ Intel macOS never ran on a hybrid Mac, so it treats every core of an Alder Lake 
 | QoS scheduling | Background work (Spotlight, Time Machine, photo analysis) on E-cores; foreground on P-cores |
 | `hw.nperflevels` / `hw.perflevel0/1` | `2` / "Performance" and "Efficiency", with real core counts and caches |
 | Activity Monitor → CPU History | "Core 1 — Performance" … "Core 13 — Efficiency" |
-| System Information | Unchanged (on Intel it only reads the total core count) |
+| P-core HyperThreading | Foreground avoids the sibling thread of a busy P-core (like Linux ITMT) |
+| `hw.physicalcpu` / System Information | Real core count (10 instead of 16) and "Hyper-Threading: Enabled" |
+| Battery ↔ AC | Mode switches by itself (e.g. 4 on battery, 2 on AC) |
 
 > **Warning:** kernel offsets come from xnu-12377 and were checked only on **macOS 26.7.2 (25G332)**, on an i5-13450HX (6P + 4E). Each hook is installed only if the kernel instructions match byte for byte; on another macOS version, whatever does not match stays off (see `sysctl debug.hc_log`). Tested on a single machine. Use at your own risk, with a rescue USB at hand.
 
@@ -49,7 +51,22 @@ Mode 4 halves package power under heavy background load (less heat and fan noise
 
 Real-time threads (audio, video) are never touched. A background thread promoted above priority 20 (holding a lock a foreground app waits on) escapes mode 4, so that app does not stall.
 
-Other boot-args: `-hcoff` (all off), `-hcschedoff` (no scheduler hooks), `-hcperfoff` (no `hw.perflevel` and no labels).
+**Battery ↔ AC:** boot-arg `hcpower=B,A` (e.g. `hcpower=4,2`) uses mode B on battery and A on AC; `sysctl debug.hc_power="4,2"` turns it on at runtime and `"0"` off. The mode changes only when the source changes, so a manual `debug.hc_mode` stays until the next plug/unplug. If mode 4 is not available it falls back to 3.
+
+**HyperThreading:** on by default; `sysctl debug.hc_smt=0/1` at runtime, boot-arg `-hcsmtoff` at boot.
+
+**Core totals** (`sysctl debug.hc_perf`, boot-arg `hcperf=N`):
+
+| Value | `hw.perflevel` and labels | `hw.physicalcpu(_max)` | `machdep.cpu.core_count` / `cores_per_package` / `logical_per_package` |
+|---|---|---|---|
+| 0 | kernel's | kernel's | kernel's |
+| 1 | fixed | real cores | real cores / threads |
+| **2** (default) | fixed | real cores | kernel's |
+| 3 | fixed | kernel's | real cores / threads |
+
+The default is 2 because of About This Mac (see Pitfalls).
+
+Other boot-args: `-hcoff` (all off), `-hcschedoff` (no scheduler hooks), `-hcperfoff` (no `hw.perflevel`, totals or labels).
 
 ## Install
 
@@ -58,12 +75,12 @@ Other boot-args: `-hcoff` (all off), `-hcschedoff` (no scheduler hooks), `-hcper
 3. Reboot and check:
 
 ```bash
-sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name
+sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name hw.physicalcpu debug.hc_smt debug.hc_power
 ```
 
-`state 1` = scheduler hooked; `strict-ok` = mode 4 available. The counters show how many choices went to the requested type (`bg E/P`, `fg P/E`).
+`state 1` = scheduler hooked; `strict-ok` = mode 4 available; `smt` = HyperThreading handled; `auto` = battery/AC switching on. The counters show how many choices went to the requested type (`bg E/P`, `fg P/E`) and, for foreground on P-cores, how many went to a primary thread (`smt prim`), to a secondary whose sibling was idle (`sec-free`) or busy (`sec-cont`).
 
-Reference binary (macOS 26.7.2 / 25G332 only): [`dist/`](dist). To build: `DEPS=/folder/with/MacKernelSDK+Lilu.kext bash build.sh`.
+Reference binary (macOS 26.7.2 / 25G332 only; version 0.1.0, without HyperThreading, totals or `hcpower`): [`dist/`](dist). To build: `DEPS=/folder/with/MacKernelSDK+Lilu.kext bash build.sh`.
 
 ## How it works (and how to port it to another version)
 
@@ -85,13 +102,21 @@ Mode 4 needs two more hooks, because an idle P-core pulls from the shared `dualq
 - **`sched_dualq_choose_thread`**: a P-core refuses a background thread from the queue. The function is static; its address comes from the `_sched_dualq_dispatch` table (+`0x30`), validated by `choose_processor` at +`0x58`.
 - **`sched_dualq_thread_avoid_processor`** (+`0xf0`): a background thread already running on a P-core is moved off. The kernel requeues it with `SCHED_REBALANCE`.
 
-### 3. `hw.perflevel`
-`kern_mib.c` already registers `hw.perflevel0` **and** `hw.perflevel1`; they only report "one type" because the Intel machine functions say so. IntelHybridCores replaces the `oid_handler` of those nodes (found from `_sysctl__children`) with one that answers per type.
+### 2b. HyperThreading
+The kernel builds its topology from the CPUID "per package" fields (leaves 1 and 4). On hybrid chips they hold the maximum addressable ids (`machdep.cpu.logical_per_package` = `cores_per_package` = 128), so the kernel concludes 1 thread per core: every HT thread becomes its own core, primary of itself (`processor_primary`), and `choose_processor_smt` does not know which CPUs are siblings. That topology is built before any kext loads and is left alone. IntelHybridCores groups the P-cores by the CPUID `0xB` core id (the lowest CPU number of each physical core is the primary) and, for foreground work, removes from the preferred mask and adds to the migration mask every secondary whose sibling is dispatching or running (`processor->state` ≥ 5).
+
+### 3. `hw.perflevel` and totals
+`kern_mib.c` already registers `hw.perflevel0` **and** `hw.perflevel1`; they only report "one type" because the Intel machine functions say so. IntelHybridCores replaces the `oid_handler` of those nodes (found from `_sysctl__children`) with one that answers per type. The same way it replaces `hw.physicalcpu(_max)` and `machdep.cpu.core_count` / `cores_per_package` / `logical_per_package`, keeping the original handler (used with `debug.hc_perf=0`).
 
 ### 4. Activity Monitor
 Activity Monitor reads the IODeviceTree `cpus` service and, on each child, `cluster-type` (data `"P"`/`"E"`; byte `'E'` = Efficiency, `'P'` = Performance, `'M'` = a third type) and `logical-cpu-id`. Then it **sorts all children by `logical-cpu-id`**. On a PC the children are the ACPI processors (`C000@0`, `C00C@38`… the unit address is the x2APIC id), and ACPI usually declares more processors than exist; the unused ones get ids 64+ so they sort last.
 
+### 5. Battery ↔ AC
+The battery service (`IOPMPowerSource`, e.g. `AppleSmartBattery`) is published once at boot: the publish notification does **not** fire again on plug/unplug. IntelHybridCores keeps the service and reads `ExternalConnected` every 5 s (`thread_call`).
+
 ### Pitfalls (each one cost a panic or a failed test)
+
+- **About This Mac picks the CPU name from `machdep.cpu.core_count`.** It combines the SMBIOS processor type with that total and looks it up in a table of CPUs Apple shipped. With 16 "cores" nothing matches and it shows the real CPUID name; with type `0x0F01` (Xeon W, common in OpenCore configs) and 10 cores it matches the iMac Pro's "Xeon W 10-Core". That is why the default (`hc_perf=2`) fixes `hw.physicalcpu`, which programs use, and leaves the kernel's `machdep.cpu.core_count`. Setting `ProcessorType` to a Core i5 code on a MacBookPro16,1 SMBIOS (a model that only had i7/i9) gives an "unknown" CPU.
 
 - **The Tahoe kernel is built with LTO.** `ml_get_cpu_types`, `ml_get_cpu_number_type` and friends were folded into `sysctl_hw_generic` as constants: hooking those functions changes nothing. Hence the sysctl handler swap.
 - **Static sysctls live in `__DATA_CONST`**, read-only after boot: writing `oid_handler` directly **panics**. Write through Lilu's `MachInfo::setKernelWriting`.
