@@ -220,7 +220,7 @@ static bool avHook(void *processor, void *thread, int reason) {   // sched_dualq
 }
 
 // ---- hw.perflevel
-static volatile int gPerfOn = 1;   // 0 off, 1 all, 2 all but machdep.cpu totals, 3 all but hw.physicalcpu
+static volatile int gPerfOn = 2;   // 0 off, 1 all, 2 all but machdep.cpu totals (default: About This Mac maps machdep.cpu.core_count + SMBIOS type to a marketing name, 10 cores -> "Xeon W 10-Core"), 3 all but hw.physicalcpu
 static uint32_t gTyLog[2] {}, gTyPhys[2] {}, gTyL2Share[2] {}, gTyCache[2][4] {};
 static sysctl_handler_t gHwGeneric = nullptr;
 static constexpr int kHwNPerf = 10 | (1 << 30), kHwPerfFlag = 1 << 29;   // HW_NPERFLEVELS, CTLHW_PERFLEVEL (kern_mib.c)
