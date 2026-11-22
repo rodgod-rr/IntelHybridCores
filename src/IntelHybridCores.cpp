@@ -24,8 +24,17 @@
 //    idle E-core)   3 = 2 + utility prefers E   4 = 3 + background STRICTLY on E (as on Apple Silicon)
 //  Real-time threads are never touched. A background thread promoted above priority 20 (holding a lock someone waits
 //  for) escapes strict mode to avoid priority inversion.
-//  Boot-args: -hcoff (plugin off), -hcschedoff (no scheduler hooks), -hcperfoff (no hw.perflevel / labels).
-//  sysctl: debug.hc_mode, debug.hc_stat, debug.hc_perf (1/0 at runtime), debug.hc_log.
+//
+//  SMT awareness (P-cores with HyperThreading): when choosing a CPU for foreground work, P-core secondaries whose
+//  sibling is busy are deprioritized (added to the migration mask). This avoids placing two foreground threads on the
+//  same physical P-core (sharing execution resources via HT), similar to Linux ITMT's per-core priority ranking.
+//  Stats: smt prim = foreground→P-primary, sec-free = →P-secondary (sibling idle), sec-cont = →P-secondary (contended).
+//
+//  Boot-args: -hcoff (plugin off), -hcschedoff (no scheduler hooks), -hcperfoff (no hw.perflevel / labels),
+//  -hcsmtoff (no SMT-aware foreground scheduling on P-cores with HyperThreading).
+//  hcpower=bat,ac (e.g. hcpower=4,2): auto-switch mode by power source (battery→4, AC→2).
+//  sysctl: debug.hc_mode, debug.hc_stat, debug.hc_perf (1/0 at runtime), debug.hc_smt (1/0),
+//  debug.hc_power ("bat,ac" to enable, "0" to disable), debug.hc_log.
 //
 //  Every kernel offset below comes from xnu-12377 and was checked on macOS 26.7.2 (25G332). Each hook is installed only
 //  if the instructions that use those offsets are found byte for byte; otherwise that part stays off (see debug.hc_log).
@@ -35,6 +44,7 @@
 #include <Headers/kern_api.hpp>
 #include <IOKit/IOService.h>
 #include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/IONotifier.h>
 #include <kern/thread_call.h>
 #include <sys/sysctl.h>
 
@@ -69,6 +79,15 @@ static uint64_t gPMask = 0, gEMask = 0;
 static uint32_t gState = 0;     // 1 ok, 2 symbols, 3 kernel layout differs, 4 not hybrid / CPU types, 5 route, 6 E not primary
 static bool gStrictOk = false;
 static uint64_t gSt[9] {};      // bg E/P, fg P/E, utility E/P, strict: refused/moved/swapped
+static uint64_t gSmtSt[3] {};   // fg: P-prim, P-sec (free sibling), P-sec (contended)
+static uint64_t gPPrimMask = 0, gPSecMask = 0;
+static bool gSmtAware = false;
+static volatile int gSmtOn = 1;
+
+// ---- power source auto-mode: batMode on battery, acMode on AC (IOPMPowerSource notification)
+static volatile int gBatMode = 4, gAcMode = 2;
+static bool gPowerAuto = false;
+static IONotifier *gPwrNotifier = nullptr;
 
 // ---- per-CPU probe (CPUID on every CPU, interrupts off)
 static uint8_t gCoreType[64] {};
@@ -135,8 +154,25 @@ static void *chHook(void *pset, void *processor, void *thread, void *options) { 
 	if (!cls) return FunctionCast(chHook, gChOrg)(pset, processor, thread, options);
 	auto pref = reinterpret_cast<volatile uint64_t *>((uint8_t *)pset + kPrefOff);
 	auto mig = reinterpret_cast<volatile uint64_t *>((uint8_t *)pset + kMigOff);
-	*pref = cls == 1 ? gEMask : gPMask;
-	*mig = cls == 1 ? gPMask : gEMask;
+	if (cls == 1) {
+		*pref = gEMask;
+		*mig = gPMask;
+	} else if (gSmtAware && gSmtOn) {
+		// SMT-aware foreground: prefer all P, avoid E + P-secondaries whose sibling is busy (contended HT)
+		uint64_t avoid = gEMask;
+		for (uint64_t m = gPSecMask; m; m &= m - 1) {
+			const uint32_t s = (uint32_t)__builtin_ctzll(m);
+			void *sp = gProcArray[s];
+			if (!sp) continue;
+			void *pr = fld<void *>(sp, kProcPrimary);
+			if (pr && fld<int>(pr, kProcState) >= 5) avoid |= 1ULL << s;   // primary dispatching/running
+		}
+		*pref = gPMask & ~avoid;   // contended P-secondaries leave the preferred set too
+		*mig = avoid;
+	} else {
+		*pref = gPMask;
+		*mig = gEMask;
+	}
 	void *r = FunctionCast(chHook, gChOrg)(pset, processor, thread, options);
 	*pref = 0; *mig = 0;
 	if (r && mode >= 4 && gStrictOk && cls == 1 && qos != 3 && isPCpu(r) && strictBg(thread))
@@ -145,6 +181,13 @@ static void *chHook(void *pset, void *processor, void *thread, void *options) { 
 		const uint32_t id = fld<uint32_t>(r, kCpuIdOff);
 		const bool isE = id < 64 && ((gEMask >> id) & 1);
 		gSt[(cls == 2 ? 2 : qos == 3 ? 4 : 0) + (cls == 2 ? isE : !isE)]++;
+		if (cls == 2 && gSmtAware && gSmtOn && !isE && id < 64) {
+			if ((gPPrimMask >> id) & 1) gSmtSt[0]++;
+			else {
+				void *pr = fld<void *>(r, kProcPrimary);
+				gSmtSt[pr && fld<int>(pr, kProcState) >= 5 ? 2 : 1]++;
+			}
+		}
 	}
 	return r;
 }
@@ -214,9 +257,10 @@ static int modeSysctl SYSCTL_HANDLER_ARGS {
 }
 SYSCTL_PROC(_debug, OID_AUTO, hc_mode, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, modeSysctl, "I", "");
 static int statSysctl SYSCTL_HANDLER_ARGS {
-	char s[256];
-	snprintf(s, sizeof(s), "state %u%s mode %d P 0x%llx E 0x%llx | bg E/P %llu/%llu | fg P/E %llu/%llu | utility E/P %llu/%llu | strict refused %llu moved %llu swapped %llu",
-	         gState, gStrictOk ? " strict-ok" : "", gMode, gPMask, gEMask, gSt[0], gSt[1], gSt[2], gSt[3], gSt[4], gSt[5], gSt[6], gSt[7], gSt[8]);
+	char s[384];
+	snprintf(s, sizeof(s), "state %u%s%s mode %d%s P 0x%llx E 0x%llx | bg E/P %llu/%llu | fg P/E %llu/%llu | utility E/P %llu/%llu | strict refused %llu moved %llu swapped %llu | smt prim %llu sec-free %llu sec-cont %llu",
+	         gState, gStrictOk ? " strict-ok" : "", gSmtAware ? (gSmtOn ? " smt" : " smt-off") : "",
+	         gMode, gPowerAuto ? " auto" : "", gPMask, gEMask, gSt[0], gSt[1], gSt[2], gSt[3], gSt[4], gSt[5], gSt[6], gSt[7], gSt[8], gSmtSt[0], gSmtSt[1], gSmtSt[2]);
 	return sysctl_handle_string(oidp, s, 0, req);
 }
 SYSCTL_PROC(_debug, OID_AUTO, hc_stat, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, statSysctl, "A", "");
@@ -228,6 +272,62 @@ static int perfSysctl SYSCTL_HANDLER_ARGS {
 SYSCTL_PROC(_debug, OID_AUTO, hc_perf, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, perfSysctl, "I", "");
 static int logSysctl SYSCTL_HANDLER_ARGS { return sysctl_handle_string(oidp, gLog, 0, req); }
 SYSCTL_PROC(_debug, OID_AUTO, hc_log, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, logSysctl, "A", "");
+static int smtSysctl SYSCTL_HANDLER_ARGS {
+	int v = gSmtOn; const int e = sysctl_handle_int(oidp, &v, 0, req);
+	if (!e && req->newptr) { gSmtOn = v ? 1 : 0; hcLog("smt %s", gSmtOn ? "on" : "off"); }
+	return e;
+}
+SYSCTL_PROC(_debug, OID_AUTO, hc_smt, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, smtSysctl, "I", "");
+// ---- power source: the battery service is published once at boot (the publish notification does NOT fire again on
+// plug/unplug), so it is kept retained and its ExternalConnected is polled every 5 s. The mode is changed only when the
+// source changes (or auto is turned on), so a manual debug.hc_mode stays until the next plug/unplug.
+static IOService *gPwrSrc = nullptr;
+static thread_call_t gPwrTc = nullptr;
+static volatile int gLastAC = -1;
+static void pwrCheck() {
+	if (!gPowerAuto || gState != 1 || !gPwrSrc) return;
+	auto conn = OSDynamicCast(OSBoolean, gPwrSrc->getProperty("ExternalConnected"));
+	if (!conn) return;
+	const int ac = conn->isTrue() ? 1 : 0;
+	if (ac == gLastAC) return;
+	gLastAC = ac;
+	int m = ac ? gAcMode : gBatMode;
+	m = m < 0 ? 0 : m > 4 ? 4 : m;
+	if (m == 4 && !gStrictOk) m = 3;
+	gMode = m;
+	hcLog("power %s -> mode %d", ac ? "AC" : "battery", gMode);
+}
+static void pwrTick(thread_call_param_t, thread_call_param_t) {
+	pwrCheck();
+	uint64_t dl; clock_interval_to_deadline(5, kSecondScale, &dl); thread_call_enter_delayed(gPwrTc, dl);
+}
+// power auto-mode: "bat,ac" e.g. "4,2" or "0" to disable
+static int powerSysctl SYSCTL_HANDLER_ARGS {
+	char buf[16];
+	snprintf(buf, sizeof(buf), gPowerAuto ? "%d,%d" : "0", gBatMode, gAcMode);
+	const int e = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	if (!e && req->newptr) {
+		int b, a;
+		if (buf[0] == '0' && (buf[1] == 0 || buf[1] == '\n')) {
+			gPowerAuto = false;
+			hcLog("power auto off");
+		} else if (sscanf(buf, "%d,%d", &b, &a) == 2 && b >= 0 && b <= 4 && a >= 0 && a <= 4) {
+			gBatMode = b; gAcMode = a; gLastAC = -1; gPowerAuto = true;
+			hcLog("power auto bat=%d ac=%d", gBatMode, gAcMode);
+			pwrCheck();
+		}
+	}
+	return e;
+}
+SYSCTL_PROC(_debug, OID_AUTO, hc_power, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, powerSysctl, "A", "");
+
+static bool pwrSourcePublished(void *, void *, IOService *svc, IONotifier *) {
+	if (!svc || gPwrSrc) return true;
+	svc->retain(); gPwrSrc = svc;
+	hcLog("power: watching %s", svc->getName());
+	if (gPwrTc) thread_call_enter(gPwrTc);
+	return true;
+}
 
 static bool hasBytes(mach_vm_address_t fn, size_t len, const uint8_t *pat, size_t n) {
 	auto p = reinterpret_cast<const uint8_t *>(fn);
@@ -332,6 +432,18 @@ static void schedInstall(KernelPatcher &patcher, mach_vm_address_t fn) {
 		void *p = gProcArray[__builtin_ctzll(m)];
 		if (p && fld<void *>(p, kProcPrimary) != p) { gState = 6; hcLog("scheduler: E-core cpu %d is an SMT secondary (CpuTopologyRebuild?), not hooked", __builtin_ctzll(m)); return; }
 	}
+	// SMT topology: separate P-core primaries from secondaries (kProcPrimary verified by pPrim byte check above)
+	if (!checkKernelArgument("-hcsmtoff")) {
+		for (uint32_t i = 0; i < 64; i++) {
+			if (!((gPMask >> i) & 1) || !gProcArray[i]) continue;
+			if (fld<void *>(gProcArray[i], kProcPrimary) == gProcArray[i])
+				gPPrimMask |= 1ULL << i;
+			else
+				gPSecMask |= 1ULL << i;
+		}
+		gSmtAware = gPPrimMask != 0 && gPSecMask != 0;
+		if (gSmtAware) hcLog("SMT: P-prim 0x%llx P-sec 0x%llx", gPPrimMask, gPSecMask);
+	}
 	gChOrg = patcher.routeFunction(fn, reinterpret_cast<mach_vm_address_t>(chHook), true);
 	if (patcher.getError() != KernelPatcher::Error::NoError) { gChOrg = 0; gState = 5; patcher.clearError(); hcLog("scheduler: route failed"); return; }
 	// strict mode: choose_thread (+0x30) and thread_avoid_processor (+0xf0) of the dualq table; choose_processor (+0x58)
@@ -361,7 +473,8 @@ static void schedInstall(KernelPatcher &patcher, mach_vm_address_t fn) {
 	if (PE_parse_boot_argn("hcmode", &m, sizeof(m))) gMode = m < 0 ? 0 : m > 4 ? 4 : m;
 	if (gMode == 4 && !gStrictOk) gMode = 3;
 	gState = 1;
-	hcLog("scheduler: hooked, mode %d%s", gMode, gStrictOk ? ", strict available" : "");
+	if (gSmtAware) sysctl_register_oid(&sysctl__debug_hc_smt);
+	hcLog("scheduler: hooked, mode %d%s%s", gMode, gStrictOk ? ", strict available" : "", gSmtAware ? ", SMT aware" : "");
 }
 
 static void hcInstall(KernelPatcher &patcher) {
@@ -387,6 +500,25 @@ static void hcInstall(KernelPatcher &patcher) {
 	hcLog("CPUs: P 0x%llx E 0x%llx", gPMask, gEMask);
 	schedInstall(patcher, fn);
 	perfInstall(patcher);
+	// power auto-mode: boot-arg hcpower=bat,ac (e.g. hcpower=4,2) enables auto-switching by power source
+	char pw[16] {};
+	if (PE_parse_boot_argn("hcpower", pw, sizeof(pw))) {
+		int pb, pa;
+		if (sscanf(pw, "%d,%d", &pb, &pa) == 2 && pb >= 0 && pb <= 4 && pa >= 0 && pa <= 4) {
+			gBatMode = pb; gAcMode = pa; gPowerAuto = true;
+			hcLog("power auto: bat=%d ac=%d", gBatMode, gAcMode);
+		}
+	}
+	sysctl_register_oid(&sysctl__debug_hc_power);
+	if (gState == 1) {
+		auto dict = IOService::serviceMatching("IOPMPowerSource");
+		if (dict) {
+			gPwrTc = thread_call_allocate(pwrTick, nullptr);
+			gPwrNotifier = IOService::addMatchingNotification(
+				gIOPublishNotification, dict, pwrSourcePublished, nullptr);
+			dict->release();
+		}
+	}
 }
 
 static const char *bootargOff[] {"-hcoff"};
