@@ -81,6 +81,7 @@ static bool gStrictOk = false;
 static uint64_t gSt[9] {};      // bg E/P, fg P/E, utility E/P, strict: refused/moved/swapped
 static uint64_t gSmtSt[3] {};   // fg: P-prim, P-sec (free sibling), P-sec (contended)
 static uint64_t gPPrimMask = 0, gPSecMask = 0;
+static uint8_t gSib[64] {};      // HT sibling (same CPUID core id) of each P-secondary
 static bool gSmtAware = false;
 static volatile int gSmtOn = 1;
 
@@ -164,8 +165,8 @@ static void *chHook(void *pset, void *processor, void *thread, void *options) { 
 			const uint32_t s = (uint32_t)__builtin_ctzll(m);
 			void *sp = gProcArray[s];
 			if (!sp) continue;
-			void *pr = fld<void *>(sp, kProcPrimary);
-			if (pr && fld<int>(pr, kProcState) >= 5) avoid |= 1ULL << s;   // primary dispatching/running
+			void *pr = gProcArray[gSib[s]];
+			if (pr && fld<int>(pr, kProcState) >= 5) avoid |= 1ULL << s;   // sibling dispatching/running
 		}
 		*pref = gPMask & ~avoid;   // contended P-secondaries leave the preferred set too
 		*mig = avoid;
@@ -184,7 +185,7 @@ static void *chHook(void *pset, void *processor, void *thread, void *options) { 
 		if (cls == 2 && gSmtAware && gSmtOn && !isE && id < 64) {
 			if ((gPPrimMask >> id) & 1) gSmtSt[0]++;
 			else {
-				void *pr = fld<void *>(r, kProcPrimary);
+				void *pr = gProcArray[gSib[id]];
 				gSmtSt[pr && fld<int>(pr, kProcState) >= 5 ? 2 : 1]++;
 			}
 		}
@@ -432,17 +433,19 @@ static void schedInstall(KernelPatcher &patcher, mach_vm_address_t fn) {
 		void *p = gProcArray[__builtin_ctzll(m)];
 		if (p && fld<void *>(p, kProcPrimary) != p) { gState = 6; hcLog("scheduler: E-core cpu %d is an SMT secondary (CpuTopologyRebuild?), not hooked", __builtin_ctzll(m)); return; }
 	}
-	// SMT topology: separate P-core primaries from secondaries (kProcPrimary verified by pPrim byte check above)
+	// SMT topology from CPUID (the kernel may see every HT thread as its own core, hw.physicalcpu == logicalcpu, so
+	// processor_primary is useless): in each physical P-core (same gCoreId) the lowest CPU number is the primary.
 	if (!checkKernelArgument("-hcsmtoff")) {
 		for (uint32_t i = 0; i < 64; i++) {
 			if (!((gPMask >> i) & 1) || !gProcArray[i]) continue;
-			if (fld<void *>(gProcArray[i], kProcPrimary) == gProcArray[i])
-				gPPrimMask |= 1ULL << i;
-			else
-				gPSecMask |= 1ULL << i;
+			int prim = -1;
+			for (uint32_t j = 0; j < i; j++)
+				if (((gPMask >> j) & 1) && gProcArray[j] && gCoreId[j] == gCoreId[i]) { prim = (int)j; break; }
+			if (prim < 0) gPPrimMask |= 1ULL << i;
+			else { gPSecMask |= 1ULL << i; gSib[i] = (uint8_t)prim; }
 		}
 		gSmtAware = gPPrimMask != 0 && gPSecMask != 0;
-		if (gSmtAware) hcLog("SMT: P-prim 0x%llx P-sec 0x%llx", gPPrimMask, gPSecMask);
+		hcLog("SMT: P-prim 0x%llx P-sec 0x%llx%s", gPPrimMask, gPSecMask, gSmtAware ? "" : " (no HT pairs, off)");
 	}
 	gChOrg = patcher.routeFunction(fn, reinterpret_cast<mach_vm_address_t>(chHook), true);
 	if (patcher.getError() != KernelPatcher::Error::NoError) { gChOrg = 0; gState = 5; patcher.clearError(); hcLog("scheduler: route failed"); return; }
