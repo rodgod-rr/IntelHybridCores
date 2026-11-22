@@ -36,7 +36,7 @@
 //  sysctl: debug.hc_mode, debug.hc_stat, debug.hc_perf (0 off, 1 all, 2 not machdep.cpu totals, 3 not hw.physicalcpu; boot-arg hcperf=N), debug.hc_smt (1/0),
 //  debug.hc_power ("bat,ac" to enable, "0" to disable), debug.hc_log.
 //
-//  Every kernel offset below comes from xnu-12377 and was checked on macOS 26.7.2 (25G332). Each hook is installed only
+//  Every kernel offset below comes from xnu-12377 and was checked on macOS 26.7.2 (25G332) and 26.7.3 (25G342). Each hook is installed only
 //  if the instructions that use those offsets are found byte for byte; otherwise that part stays off (see debug.hc_log).
 //  Requires E-cores to be SMT primaries: with CpuTopologyRebuild's default mode (E-cores reported as SMT siblings of the
 //  P-cores) the scheduler part disables itself.
