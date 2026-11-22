@@ -33,7 +33,7 @@
 //  Boot-args: -hcoff (plugin off), -hcschedoff (no scheduler hooks), -hcperfoff (no hw.perflevel / labels),
 //  -hcsmtoff (no SMT-aware foreground scheduling on P-cores with HyperThreading).
 //  hcpower=bat,ac (e.g. hcpower=4,2): auto-switch mode by power source (battery→4, AC→2).
-//  sysctl: debug.hc_mode, debug.hc_stat, debug.hc_perf (1/0 at runtime), debug.hc_smt (1/0),
+//  sysctl: debug.hc_mode, debug.hc_stat, debug.hc_perf (0 off, 1 all, 2 not machdep.cpu totals, 3 not hw.physicalcpu; boot-arg hcperf=N), debug.hc_smt (1/0),
 //  debug.hc_power ("bat,ac" to enable, "0" to disable), debug.hc_log.
 //
 //  Every kernel offset below comes from xnu-12377 and was checked on macOS 26.7.2 (25G332). Each hook is installed only
@@ -220,7 +220,7 @@ static bool avHook(void *processor, void *thread, int reason) {   // sched_dualq
 }
 
 // ---- hw.perflevel
-static volatile int gPerfOn = 1;
+static volatile int gPerfOn = 1;   // 0 off, 1 all, 2 all but machdep.cpu totals, 3 all but hw.physicalcpu
 static uint32_t gTyLog[2] {}, gTyPhys[2] {}, gTyL2Share[2] {}, gTyCache[2][4] {};
 static sysctl_handler_t gHwGeneric = nullptr;
 static constexpr int kHwNPerf = 10 | (1 << 30), kHwPerfFlag = 1 << 29;   // HW_NPERFLEVELS, CTLHW_PERFLEVEL (kern_mib.c)
@@ -256,7 +256,8 @@ static int gTopoKind[kTopoN] {};
 static int topoHandler SYSCTL_HANDLER_ARGS {
 	for (int i = 0; i < kTopoN; i++) {
 		if (gTopoOid[i] != oidp) continue;
-		if (!gPerfOn) return gTopoOrg[i](oidp, arg1, arg2, req);
+		const bool isHw = gTopoKind[i] == kTopoPhys;
+		if (!gPerfOn || (gPerfOn == 2 && !isHw) || (gPerfOn == 3 && isHw)) return gTopoOrg[i](oidp, arg1, arg2, req);
 		const int v = gTopoKind[i] == kTopoLogical ? (int)(gTyLog[0] + gTyLog[1]) : (int)(gTyPhys[0] + gTyPhys[1]);
 		return sysctl_handle_int(oidp, nullptr, v, req);
 	}
@@ -285,7 +286,7 @@ static int statSysctl SYSCTL_HANDLER_ARGS {
 SYSCTL_PROC(_debug, OID_AUTO, hc_stat, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, statSysctl, "A", "");
 static int perfSysctl SYSCTL_HANDLER_ARGS {
 	int v = gPerfOn; const int e = sysctl_handle_int(oidp, &v, 0, req);
-	if (!e && req->newptr) gPerfOn = v ? 1 : 0;
+	if (!e && req->newptr) gPerfOn = v >= 0 && v <= 3 ? v : 1;
 	return e;
 }
 SYSCTL_PROC(_debug, OID_AUTO, hc_perf, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, perfSysctl, "I", "");
@@ -393,6 +394,8 @@ static sysctl_oid *oidFind(sysctl_oid_list *l, const char *name) {
 
 static void perfInstall(KernelPatcher &patcher) {
 	if (checkKernelArgument("-hcperfoff")) return;
+	int pv;
+	if (PE_parse_boot_argn("hcperf", &pv, sizeof(pv)) && pv >= 0 && pv <= 3) gPerfOn = pv;
 	for (int t = 0; t < 2; t++) {
 		const uint64_t m = t == 0 ? gPMask : gEMask;
 		uint32_t cores[64], l2s[64], nc = 0, nl = 0;
