@@ -13,7 +13,7 @@ O macOS para Intel nunca rodou num Mac com núcleos híbridos, então trata todo
 | `hw.physicalcpu` / Informações do Sistema | Núcleos reais (10 em vez de 16) e "Hyper-Threading: Ativado" |
 | Bateria ↔ tomada | Troca de modo sozinha (ex.: 4 na bateria, 2 na tomada) |
 
-> **Atenção:** os offsets do kernel foram tirados do xnu-12377 e conferidos no **macOS 26.7.2 (25G332)** e **26.7.3 (25G342)**, num i5-13450HX (6P + 4E). Cada gancho só é instalado se as instruções do kernel baterem byte a byte; em outra versão do macOS, a parte que não bater fica desligada (ver `sysctl debug.hc_log`). Testado em uma máquina só. Use por sua conta e com um pendrive de socorro à mão.
+> **Atenção:** os offsets do kernel foram tirados do xnu-12377 e conferidos no **macOS 26.7.2 (25G332)** e **26.7.3 (25G342)**, num i5-13450HX (6P + 4E). Cada gancho só é instalado se as instruções do kernel baterem byte a byte; em outra versão do macOS, a parte que não bater fica desligada (ver `sysctl debug.hc_log`). Testado aqui num i5-13450HX; há um relato de funcionamento num i9-13900H (6P + 8E) na [issue #1](https://github.com/rodgod-rr/IntelHybridCores/issues/1). Use por sua conta e com um pendrive de socorro à mão.
 
 ## Resultados (i5-13450HX, macOS 26.7.2)
 
@@ -70,7 +70,7 @@ Outros boot-args: `-hcoff` (desliga tudo), `-hcschedoff` (sem os ganchos do esca
 
 ## Instalação
 
-1. Requisitos: Lilu 1.6.4 ou mais novo; CPU híbrida; **CpuTopologyRebuild desligado ou com `ctrsmt=off`**. No modo padrão dele, os núcleos E viram threads SMT dos P e a preferência deixa de funcionar (o IntelHybridCores detecta isso e não instala o escalonador).
+1. Requisitos: Lilu 1.6.4 ou mais novo; CPU híbrida; **CpuTopologyRebuild desligado ou com `ctrsmt=off`** (só `off`: o modo padrão e o `ctrsmt=full` não servem). Neles, os núcleos E viram threads SMT dos P e a preferência deixa de funcionar (o IntelHybridCores detecta isso e não instala o escalonador; `debug.hc_stat` mostra `state 6`).
 2. Copie `IntelHybridCores.kext` para `EFI/OC/Kexts` e adicione em `Kernel → Add` depois do Lilu.
 3. Reinicie e confira:
 
