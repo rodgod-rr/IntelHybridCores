@@ -55,7 +55,7 @@ Real-time threads (audio, video) are never touched. A background thread promoted
 
 **HyperThreading:** on by default; `sysctl debug.hc_smt=0/1` at runtime, boot-arg `-hcsmtoff` at boot.
 
-**Throughput (off by default):** `sysctl debug.hc_tput=1` at runtime, boot-arg `-hctput` at boot. Foreground work fills the P-core primary threads and the E-cores (every physical core) before the HyperThreading siblings of busy P-cores, so heavily threaded batch work (compiles, renders) uses all physical cores: an idle E-core does more work than a P-core sibling that shares execution with its busy twin. A single interactive thread may then land on an E-core, so turn it on for build/render sessions. Needs HyperThreading handling (`smt` in `hc_stat`).
+**Throughput (off by default):** `sysctl debug.hc_tput=1` at runtime, boot-arg `-hctput` at boot. Foreground work fills the P-core primary threads and the E-cores (every physical core) before the HyperThreading siblings of busy P-cores, so heavily threaded batch work (compiles, renders) uses all physical cores: an idle E-core does more work than a P-core sibling that shares execution with its busy twin. A single interactive thread may then land on an E-core, so turn it on for build/render sessions. Needs HyperThreading handling (`smt` in `hc_stat`). Measured on the i5-13450HX (6P + 4E, mode 2, AC), 10 copies of a fixed CPU loop: 9.2-10.3 s off, 8.1-8.5 s on (~15% faster; E-core share of foreground choices 9-13% -> 27-32%); one copy alone: 7.3-7.8 s off, 8.5-9.1 s on (~15% slower).
 
 **Core totals** (`sysctl debug.hc_perf`, boot-arg `hcperf=N`):
 

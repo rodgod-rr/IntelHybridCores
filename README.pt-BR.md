@@ -55,7 +55,7 @@ Threads de tempo real (áudio, vídeo) nunca são mexidas. Uma tarefa de fundo p
 
 **HyperThreading:** ligado por padrão; `sysctl debug.hc_smt=0/1` na hora, boot-arg `-hcsmtoff` no boot.
 
-**Throughput (desligado por padrão):** `sysctl debug.hc_tput=1` na hora, boot-arg `-hctput` no boot. O primeiro plano ocupa as threads primárias dos núcleos P e os núcleos E (todos os núcleos físicos) antes das irmãs de HyperThreading de núcleos P ocupados, então trabalho em lote com muitas threads (compilação, renderização) usa todos os núcleos físicos: um núcleo E livre rende mais que a irmã de um núcleo P que divide a execução com a outra ocupada. Uma thread interativa sozinha pode cair num núcleo E, então ligue para sessões de build/render. Precisa do HyperThreading tratado (`smt` no `hc_stat`).
+**Throughput (desligado por padrão):** `sysctl debug.hc_tput=1` na hora, boot-arg `-hctput` no boot. O primeiro plano ocupa as threads primárias dos núcleos P e os núcleos E (todos os núcleos físicos) antes das irmãs de HyperThreading de núcleos P ocupados, então trabalho em lote com muitas threads (compilação, renderização) usa todos os núcleos físicos: um núcleo E livre rende mais que a irmã de um núcleo P que divide a execução com a outra ocupada. Uma thread interativa sozinha pode cair num núcleo E, então ligue para sessões de build/render. Precisa do HyperThreading tratado (`smt` no `hc_stat`). Medido no i5-13450HX (6P + 4E, modo 2, na tomada), 10 cópias de um laço de CPU fixo: 9,2-10,3 s desligado, 8,1-8,5 s ligado (~15% mais rápido; parcela dos núcleos E nas escolhas do primeiro plano 9-13% -> 27-32%); uma cópia sozinha: 7,3-7,8 s desligado, 8,5-9,1 s ligado (~15% mais lenta).
 
 **Totais de núcleos** (`sysctl debug.hc_perf`, boot-arg `hcperf=N`):
 
