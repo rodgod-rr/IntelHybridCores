@@ -13,7 +13,7 @@ O macOS para Intel nunca rodou num Mac com núcleos híbridos, então trata todo
 | `hw.physicalcpu` / Informações do Sistema | Núcleos reais (10 em vez de 16) e "Hyper-Threading: Ativado" |
 | Bateria ↔ tomada | Troca de modo sozinha (ex.: 4 na bateria, 2 na tomada) |
 
-> **Atenção:** os offsets do kernel foram tirados do xnu-12377 e conferidos no **macOS 26.7.2 (25G332)** e **26.7.3 (25G342)**, num i5-13450HX (6P + 4E). Cada gancho só é instalado se as instruções do kernel baterem byte a byte; em outra versão do macOS, a parte que não bater fica desligada (ver `sysctl debug.hc_log`). Testado aqui num i5-13450HX; há um relato de funcionamento num i9-13900H (6P + 8E) na [issue #1](https://github.com/rodgod-rr/IntelHybridCores/issues/1). Use por sua conta e com um pendrive de socorro à mão.
+> **Atenção:** os offsets do kernel foram tirados do xnu-12377 e conferidos no **macOS 26.7.2 (25G332)** e **26.7.3 (25G342)**, num i5-13450HX (6P + 4E). Cada gancho só é instalado se as instruções do kernel baterem byte a byte; em outra versão do macOS, a parte que não bater fica desligada (ver `sysctl debug.hc_log`). Testado aqui num i5-13450HX; há um relato de funcionamento num i9-13900H (6P + 8E) na [issue #1](https://github.com/rodgod-rr/IntelHybridCores/issues/1) e num i7-12700F (8P + 4E, Alder Lake de desktop) na [issue #2](https://github.com/rodgod-rr/IntelHybridCores/issues/2). Use por sua conta e com um pendrive de socorro à mão.
 
 ## Resultados (i5-13450HX, macOS 26.7.2)
 
@@ -82,7 +82,7 @@ sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name hw.physicalc
 
 `state 1` = escalonador instalado; `strict-ok` = modo 4 disponível; `smt` = HyperThreading tratado; `auto` = troca bateria/tomada ligada; `tput` = throughput ligado. Os contadores mostram quantas escolhas foram para o tipo pedido (`bg E/P`, `fg P/E`) e, no primeiro plano em núcleos P, quantas foram para uma thread primária (`smt prim`), para uma secundária com a irmã livre (`sec-free`) ou ocupada (`sec-cont`). Escrever qualquer valor (`sysctl debug.hc_stat=0`) zera os contadores, para medir uma carga só, como um build.
 
-Binário de referência 0.2.0 (testado no macOS 26.7.3 / 25G342): [`dist/`](dist). A 0.1.0 (sem HyperThreading, totais nem `hcpower`) fica no histórico do git. Para compilar: `DEPS=/pasta/com/MacKernelSDK+Lilu.kext bash build.sh`.
+Binário de referência 0.3.0 (testado no macOS 26.7.3 / 25G342): [`dist/`](dist). A 0.3.0 traz a opção throughput (`hc_tput`) e o zerar do `hc_stat`; a 0.2.0 (sem elas) e a 0.1.0 (sem HyperThreading, totais nem `hcpower`) ficam no histórico do git. Para compilar: `DEPS=/pasta/com/MacKernelSDK+Lilu.kext bash build.sh`.
 
 ## Como funciona (e como reproduzir em outra versão)
 

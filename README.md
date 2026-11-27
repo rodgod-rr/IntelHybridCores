@@ -13,7 +13,7 @@ Intel macOS never ran on a hybrid Mac, so it treats every core of an Alder Lake 
 | `hw.physicalcpu` / System Information | Real core count (10 instead of 16) and "Hyper-Threading: Enabled" |
 | Battery ↔ AC | Mode switches by itself (e.g. 4 on battery, 2 on AC) |
 
-> **Warning:** kernel offsets come from xnu-12377 and were checked on **macOS 26.7.2 (25G332)** and **26.7.3 (25G342)**, on an i5-13450HX (6P + 4E). Each hook is installed only if the kernel instructions match byte for byte; on another macOS version, whatever does not match stays off (see `sysctl debug.hc_log`). Tested here on an i5-13450HX; there is a working report on an i9-13900H (6P + 8E) in [issue #1](https://github.com/rodgod-rr/IntelHybridCores/issues/1). Use at your own risk, with a rescue USB at hand.
+> **Warning:** kernel offsets come from xnu-12377 and were checked on **macOS 26.7.2 (25G332)** and **26.7.3 (25G342)**, on an i5-13450HX (6P + 4E). Each hook is installed only if the kernel instructions match byte for byte; on another macOS version, whatever does not match stays off (see `sysctl debug.hc_log`). Tested here on an i5-13450HX; there is a working report on an i9-13900H (6P + 8E) in [issue #1](https://github.com/rodgod-rr/IntelHybridCores/issues/1) and on an i7-12700F (8P + 4E, Alder Lake desktop) in [issue #2](https://github.com/rodgod-rr/IntelHybridCores/issues/2). Use at your own risk, with a rescue USB at hand.
 
 ## Results (i5-13450HX, macOS 26.7.2)
 
@@ -82,7 +82,7 @@ sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name hw.physicalc
 
 `state 1` = scheduler hooked; `strict-ok` = mode 4 available; `smt` = HyperThreading handled; `auto` = battery/AC switching on; `tput` = throughput on. The counters show how many choices went to the requested type (`bg E/P`, `fg P/E`) and, for foreground on P-cores, how many went to a primary thread (`smt prim`), to a secondary whose sibling was idle (`sec-free`) or busy (`sec-cont`). Writing any value (`sysctl debug.hc_stat=0`) zeroes the counters, to measure a single workload such as one build.
 
-Reference binary 0.2.0 (tested on macOS 26.7.3 / 25G342): [`dist/`](dist). Version 0.1.0 (without HyperThreading, totals or `hcpower`) is in the git history. To build: `DEPS=/folder/with/MacKernelSDK+Lilu.kext bash build.sh`.
+Reference binary 0.3.0 (tested on macOS 26.7.3 / 25G342): [`dist/`](dist). 0.3.0 adds the throughput option (`hc_tput`) and the `hc_stat` reset; 0.2.0 (without them) and 0.1.0 (without HyperThreading, totals or `hcpower`) are in the git history. To build: `DEPS=/folder/with/MacKernelSDK+Lilu.kext bash build.sh`.
 
 ## How it works (and how to port it to another version)
 
