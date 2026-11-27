@@ -32,7 +32,7 @@
 //
 //  Boot-args: -hcoff (plugin off), -hcschedoff (no scheduler hooks), -hcperfoff (no hw.perflevel / labels),
 //  -hcsmtoff (no SMT-aware foreground scheduling on P-cores with HyperThreading).
-//  -hctput (throughput, off by default; sysctl debug.hc_tput=1/0): foreground fills P-primaries and E-cores before
+//  -hctput (throughput, off by default; sysctl debug.hc_tput=1/0): foreground takes idle P-primaries, then E-cores, then
 //  P HT-siblings, so heavily threaded batch work (compiles, renders) uses every physical core. Needs SMT-aware mode.
 //  Writing any value to debug.hc_stat (e.g. sysctl debug.hc_stat=0) zeroes its counters, to measure one workload.
 //  hcpower=bat,ac (e.g. hcpower=4,2): auto-switch mode by power source (battery→4, AC→2).
