@@ -81,7 +81,7 @@ static volatile int gMode = 2;
 static uint64_t gPMask = 0, gEMask = 0;
 static uint32_t gState = 0;     // 1 ok, 2 symbols, 3 kernel layout differs, 4 not hybrid / CPU types, 5 route, 6 E not primary
 static bool gStrictOk = false;
-static uint64_t gSt[9] {};      // bg E/P, fg P/E, utility E/P, strict: refused/moved/swapped
+static uint64_t gSt[9] {};      // bg E/P, fg P/E, utility E/P, refused (mode 4), moved (mode 4; modes 2/3 to an idle E), swapped (mode 4)
 static uint64_t gSmtSt[3] {};   // fg: P-prim, P-sec (free sibling), P-sec (contended)
 static uint64_t gPPrimMask = 0, gPSecMask = 0;
 static uint8_t gSib[64] {};      // HT sibling (same CPUID core id) of each P-secondary
@@ -289,9 +289,9 @@ SYSCTL_PROC(_debug, OID_AUTO, hc_mode, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBOD
 static int statSysctl SYSCTL_HANDLER_ARGS {
 	if (req->newptr) { for (int i = 0; i < 9; i++) gSt[i] = 0; for (int i = 0; i < 3; i++) gSmtSt[i] = 0; return 0; }   // any write zeroes the counters
 	char s[400];
-	snprintf(s, sizeof(s), "state %u%s%s%s mode %d%s P 0x%llx E 0x%llx | bg E/P %llu/%llu | fg P/E %llu/%llu | utility E/P %llu/%llu | strict refused %llu moved %llu swapped %llu | smt prim %llu sec-free %llu sec-cont %llu",
+	snprintf(s, sizeof(s), "state %u%s%s%s mode %d%s P 0x%llx E 0x%llx | bg E/P %llu/%llu | fg P/E %llu/%llu | utility E/P %llu/%llu | moved %llu | strict refused %llu swapped %llu | smt prim %llu sec-free %llu sec-cont %llu",
 	         gState, gStrictOk ? " strict-ok" : "", gSmtAware ? (gSmtOn ? " smt" : " smt-off") : "", gTput ? " tput" : "",
-	         gMode, gPowerAuto ? " auto" : "", gPMask, gEMask, gSt[0], gSt[1], gSt[2], gSt[3], gSt[4], gSt[5], gSt[6], gSt[7], gSt[8], gSmtSt[0], gSmtSt[1], gSmtSt[2]);
+	         gMode, gPowerAuto ? " auto" : "", gPMask, gEMask, gSt[0], gSt[1], gSt[2], gSt[3], gSt[4], gSt[5], gSt[7], gSt[6], gSt[8], gSmtSt[0], gSmtSt[1], gSmtSt[2]);
 	return sysctl_handle_string(oidp, s, 0, req);
 }
 SYSCTL_PROC(_debug, OID_AUTO, hc_stat, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, statSysctl, "A", "");

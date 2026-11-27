@@ -3,6 +3,13 @@
 All notable changes to IntelHybridCores. Kernel offsets come from xnu-12377; each hook is installed only if the kernel
 instructions match byte for byte.
 
+## [Unreleased]
+
+### Changed
+- `debug.hc_stat`: `moved` is printed on its own (`| moved N | strict refused N swapped N |`) instead of inside the
+  `strict` group, since it also counts in modes 2/3 (background taken off a P-core when an E-core is idle). Scripts that
+  parse the old `strict refused N moved N swapped N` order need updating.
+
 ## [0.3.0] - 2026-11-27
 
 Reference binary for macOS 26.7.3 (25G342).
@@ -49,6 +56,7 @@ First release. Offsets checked on macOS 26.7.2 (25G332).
 - Activity Monitor CPU History labels ("Core N — Performance / Efficiency").
 - Diagnostics: `debug.hc_stat`, `debug.hc_log`; boot-args `-hcoff`, `-hcschedoff`, `-hcperfoff`.
 
+[Unreleased]: https://github.com/rodgod-rr/IntelHybridCores/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/rodgod-rr/IntelHybridCores/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rodgod-rr/IntelHybridCores/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rodgod-rr/IntelHybridCores/releases/tag/v0.1.0
