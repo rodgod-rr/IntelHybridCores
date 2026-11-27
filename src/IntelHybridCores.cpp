@@ -32,6 +32,9 @@
 //
 //  Boot-args: -hcoff (plugin off), -hcschedoff (no scheduler hooks), -hcperfoff (no hw.perflevel / labels),
 //  -hcsmtoff (no SMT-aware foreground scheduling on P-cores with HyperThreading).
+//  -hctput (throughput, off by default; sysctl debug.hc_tput=1/0): foreground fills P-primaries and E-cores before
+//  P HT-siblings, so heavily threaded batch work (compiles, renders) uses every physical core. Needs SMT-aware mode.
+//  Writing any value to debug.hc_stat (e.g. sysctl debug.hc_stat=0) zeroes its counters, to measure one workload.
 //  hcpower=bat,ac (e.g. hcpower=4,2): auto-switch mode by power source (battery→4, AC→2).
 //  sysctl: debug.hc_mode, debug.hc_stat, debug.hc_perf (0 off, 1 all, 2 not machdep.cpu totals, 3 not hw.physicalcpu; boot-arg hcperf=N), debug.hc_smt (1/0),
 //  debug.hc_power ("bat,ac" to enable, "0" to disable), debug.hc_log.
@@ -84,6 +87,7 @@ static uint64_t gPPrimMask = 0, gPSecMask = 0;
 static uint8_t gSib[64] {};      // HT sibling (same CPUID core id) of each P-secondary
 static bool gSmtAware = false;
 static volatile int gSmtOn = 1;
+static volatile int gTput = 0;   // throughput: bulk foreground spreads across all physical cores (P+E) before HT siblings
 
 // ---- power source auto-mode: batMode on battery, acMode on AC (IOPMPowerSource notification)
 static volatile int gBatMode = 4, gAcMode = 2;
@@ -158,6 +162,11 @@ static void *chHook(void *pset, void *processor, void *thread, void *options) { 
 	if (cls == 1) {
 		*pref = gEMask;
 		*mig = gPMask;
+	} else if (gTput && gSmtAware && gSmtOn) {
+		// throughput: fill P-primaries and E-cores (all physical cores) before P HT-siblings. Best for heavily
+		// threaded batch work (compiles, renders): a real E-core beats a P-core HT sibling that shares execution.
+		*pref = gPPrimMask | gEMask;
+		*mig = gPSecMask;
 	} else if (gSmtAware && gSmtOn) {
 		// SMT-aware foreground: prefer all P, avoid E + P-secondaries whose sibling is busy (contended HT)
 		uint64_t avoid = gEMask;
@@ -277,13 +286,14 @@ static int modeSysctl SYSCTL_HANDLER_ARGS {
 }
 SYSCTL_PROC(_debug, OID_AUTO, hc_mode, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, modeSysctl, "I", "");
 static int statSysctl SYSCTL_HANDLER_ARGS {
-	char s[384];
-	snprintf(s, sizeof(s), "state %u%s%s mode %d%s P 0x%llx E 0x%llx | bg E/P %llu/%llu | fg P/E %llu/%llu | utility E/P %llu/%llu | strict refused %llu moved %llu swapped %llu | smt prim %llu sec-free %llu sec-cont %llu",
-	         gState, gStrictOk ? " strict-ok" : "", gSmtAware ? (gSmtOn ? " smt" : " smt-off") : "",
+	if (req->newptr) { for (int i = 0; i < 9; i++) gSt[i] = 0; for (int i = 0; i < 3; i++) gSmtSt[i] = 0; return 0; }   // any write zeroes the counters
+	char s[400];
+	snprintf(s, sizeof(s), "state %u%s%s%s mode %d%s P 0x%llx E 0x%llx | bg E/P %llu/%llu | fg P/E %llu/%llu | utility E/P %llu/%llu | strict refused %llu moved %llu swapped %llu | smt prim %llu sec-free %llu sec-cont %llu",
+	         gState, gStrictOk ? " strict-ok" : "", gSmtAware ? (gSmtOn ? " smt" : " smt-off") : "", gTput ? " tput" : "",
 	         gMode, gPowerAuto ? " auto" : "", gPMask, gEMask, gSt[0], gSt[1], gSt[2], gSt[3], gSt[4], gSt[5], gSt[6], gSt[7], gSt[8], gSmtSt[0], gSmtSt[1], gSmtSt[2]);
 	return sysctl_handle_string(oidp, s, 0, req);
 }
-SYSCTL_PROC(_debug, OID_AUTO, hc_stat, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, statSysctl, "A", "");
+SYSCTL_PROC(_debug, OID_AUTO, hc_stat, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, statSysctl, "A", "");
 static int perfSysctl SYSCTL_HANDLER_ARGS {
 	int v = gPerfOn; const int e = sysctl_handle_int(oidp, &v, 0, req);
 	if (!e && req->newptr) gPerfOn = v >= 0 && v <= 3 ? v : 1;
@@ -298,6 +308,12 @@ static int smtSysctl SYSCTL_HANDLER_ARGS {
 	return e;
 }
 SYSCTL_PROC(_debug, OID_AUTO, hc_smt, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, smtSysctl, "I", "");
+static int tputSysctl SYSCTL_HANDLER_ARGS {
+	int v = gTput; const int e = sysctl_handle_int(oidp, &v, 0, req);
+	if (!e && req->newptr) { gTput = v ? 1 : 0; hcLog("throughput %s", gTput ? "on" : "off"); }
+	return e;
+}
+SYSCTL_PROC(_debug, OID_AUTO, hc_tput, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, nullptr, 0, tputSysctl, "I", "");
 // ---- power source: the battery service is published once at boot (the publish notification does NOT fire again on
 // plug/unplug), so it is kept retained and its ExternalConnected is polled every 5 s. The mode is changed only when the
 // source changes (or auto is turned on), so a manual debug.hc_mode stays until the next plug/unplug.
@@ -513,8 +529,9 @@ static void schedInstall(KernelPatcher &patcher, mach_vm_address_t fn) {
 	int m = 2;
 	if (PE_parse_boot_argn("hcmode", &m, sizeof(m))) gMode = m < 0 ? 0 : m > 4 ? 4 : m;
 	if (gMode == 4 && !gStrictOk) gMode = 3;
+	if (checkKernelArgument("-hctput")) gTput = 1;
 	gState = 1;
-	if (gSmtAware) sysctl_register_oid(&sysctl__debug_hc_smt);
+	if (gSmtAware) { sysctl_register_oid(&sysctl__debug_hc_smt); sysctl_register_oid(&sysctl__debug_hc_tput); }
 	hcLog("scheduler: hooked, mode %d%s%s", gMode, gStrictOk ? ", strict available" : "", gSmtAware ? ", SMT aware" : "");
 }
 

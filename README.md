@@ -55,6 +55,8 @@ Real-time threads (audio, video) are never touched. A background thread promoted
 
 **HyperThreading:** on by default; `sysctl debug.hc_smt=0/1` at runtime, boot-arg `-hcsmtoff` at boot.
 
+**Throughput (off by default):** `sysctl debug.hc_tput=1` at runtime, boot-arg `-hctput` at boot. Foreground work fills the P-core primary threads and the E-cores (every physical core) before the HyperThreading siblings of busy P-cores, so heavily threaded batch work (compiles, renders) uses all physical cores: an idle E-core does more work than a P-core sibling that shares execution with its busy twin. A single interactive thread may then land on an E-core, so turn it on for build/render sessions. Needs HyperThreading handling (`smt` in `hc_stat`).
+
 **Core totals** (`sysctl debug.hc_perf`, boot-arg `hcperf=N`):
 
 | Value | `hw.perflevel` and labels | `hw.physicalcpu(_max)` | `machdep.cpu.core_count` / `cores_per_package` / `logical_per_package` |
@@ -78,7 +80,7 @@ Other boot-args: `-hcoff` (all off), `-hcschedoff` (no scheduler hooks), `-hcper
 sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name hw.physicalcpu debug.hc_smt debug.hc_power
 ```
 
-`state 1` = scheduler hooked; `strict-ok` = mode 4 available; `smt` = HyperThreading handled; `auto` = battery/AC switching on. The counters show how many choices went to the requested type (`bg E/P`, `fg P/E`) and, for foreground on P-cores, how many went to a primary thread (`smt prim`), to a secondary whose sibling was idle (`sec-free`) or busy (`sec-cont`).
+`state 1` = scheduler hooked; `strict-ok` = mode 4 available; `smt` = HyperThreading handled; `auto` = battery/AC switching on; `tput` = throughput on. The counters show how many choices went to the requested type (`bg E/P`, `fg P/E`) and, for foreground on P-cores, how many went to a primary thread (`smt prim`), to a secondary whose sibling was idle (`sec-free`) or busy (`sec-cont`). Writing any value (`sysctl debug.hc_stat=0`) zeroes the counters, to measure a single workload such as one build.
 
 Reference binary 0.2.0 (tested on macOS 26.7.3 / 25G342): [`dist/`](dist). Version 0.1.0 (without HyperThreading, totals or `hcpower`) is in the git history. To build: `DEPS=/folder/with/MacKernelSDK+Lilu.kext bash build.sh`.
 

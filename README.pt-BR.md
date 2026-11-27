@@ -55,6 +55,8 @@ Threads de tempo real (áudio, vídeo) nunca são mexidas. Uma tarefa de fundo p
 
 **HyperThreading:** ligado por padrão; `sysctl debug.hc_smt=0/1` na hora, boot-arg `-hcsmtoff` no boot.
 
+**Throughput (desligado por padrão):** `sysctl debug.hc_tput=1` na hora, boot-arg `-hctput` no boot. O primeiro plano ocupa as threads primárias dos núcleos P e os núcleos E (todos os núcleos físicos) antes das irmãs de HyperThreading de núcleos P ocupados, então trabalho em lote com muitas threads (compilação, renderização) usa todos os núcleos físicos: um núcleo E livre rende mais que a irmã de um núcleo P que divide a execução com a outra ocupada. Uma thread interativa sozinha pode cair num núcleo E, então ligue para sessões de build/render. Precisa do HyperThreading tratado (`smt` no `hc_stat`).
+
 **Totais de núcleos** (`sysctl debug.hc_perf`, boot-arg `hcperf=N`):
 
 | Valor | `hw.perflevel` e rótulos | `hw.physicalcpu(_max)` | `machdep.cpu.core_count` / `cores_per_package` / `logical_per_package` |
@@ -78,7 +80,7 @@ Outros boot-args: `-hcoff` (desliga tudo), `-hcschedoff` (sem os ganchos do esca
 sysctl debug.hc_stat debug.hc_log hw.nperflevels hw.perflevel1.name hw.physicalcpu debug.hc_smt debug.hc_power
 ```
 
-`state 1` = escalonador instalado; `strict-ok` = modo 4 disponível; `smt` = HyperThreading tratado; `auto` = troca bateria/tomada ligada. Os contadores mostram quantas escolhas foram para o tipo pedido (`bg E/P`, `fg P/E`) e, no primeiro plano em núcleos P, quantas foram para uma thread primária (`smt prim`), para uma secundária com a irmã livre (`sec-free`) ou ocupada (`sec-cont`).
+`state 1` = escalonador instalado; `strict-ok` = modo 4 disponível; `smt` = HyperThreading tratado; `auto` = troca bateria/tomada ligada; `tput` = throughput ligado. Os contadores mostram quantas escolhas foram para o tipo pedido (`bg E/P`, `fg P/E`) e, no primeiro plano em núcleos P, quantas foram para uma thread primária (`smt prim`), para uma secundária com a irmã livre (`sec-free`) ou ocupada (`sec-cont`). Escrever qualquer valor (`sysctl debug.hc_stat=0`) zera os contadores, para medir uma carga só, como um build.
 
 Binário de referência 0.2.0 (testado no macOS 26.7.3 / 25G342): [`dist/`](dist). A 0.1.0 (sem HyperThreading, totais nem `hcpower`) fica no histórico do git. Para compilar: `DEPS=/pasta/com/MacKernelSDK+Lilu.kext bash build.sh`.
 
