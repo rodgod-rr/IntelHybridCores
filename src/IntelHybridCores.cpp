@@ -163,9 +163,10 @@ static void *chHook(void *pset, void *processor, void *thread, void *options) { 
 		*pref = gEMask;
 		*mig = gPMask;
 	} else if (gTput && gSmtAware && gSmtOn) {
-		// throughput: fill P-primaries and E-cores (all physical cores) before P HT-siblings. Best for heavily
-		// threaded batch work (compiles, renders): a real E-core beats a P-core HT sibling that shares execution.
-		*pref = gPPrimMask | gEMask;
+		// throughput: P-primaries first (preferred), then E-cores (neither preferred nor avoided), and only then P HT
+		// siblings (avoided). Heavily threaded batch work (compiles, renders) uses every physical core, since a real
+		// E-core beats a P-core HT sibling that shares execution, while a lone thread still gets an idle P-core.
+		*pref = gPPrimMask;
 		*mig = gPSecMask;
 	} else if (gSmtAware && gSmtOn) {
 		// SMT-aware foreground: prefer all P, avoid E + P-secondaries whose sibling is busy (contended HT)
